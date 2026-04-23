@@ -1,24 +1,26 @@
 /*
  *
- * Versao com implementação de fila de print -
- *    06/06/2025
+ * Versao com implementacao de fila de print
+ * 06/06/2025
  *
  */
 
 #include <avr/io.h>
 #include <Arduino.h>
 #include <TimerOne.h>
+
 /*
- *
- * Vari veis do Kernel
- *
+ * Variaveis do kernel
  */
-/*Define intervalo das interrup  es de Clock
- * Tabela de Interrup  es :
+
+/*
+ * Define intervalo das interrupcoes de clock
+ *
+ * Tabela de interrupcoes:
  * 1       ClkT = 1   segundo
  * 0.1     ClkT = 100 milissegundos
- * 0.01    Clkt = 10  milissegundos
- * 0.001   Clkt = 1   milissegundo
+ * 0.01    ClkT = 10  milissegundos
+ * 0.001   ClkT = 1   milissegundo
  * 0.0001  ClkT = 100 microssegundos
  * 0.00001 ClkT = 10  microssegundos
  */
@@ -28,9 +30,10 @@
 #define MaxNumberTask 4
 #define NUM_TASKS 4
 #define SizeTaskStack 128    // Tamanho da pilha da tarefa
-#define MAX_NKREAD_QUEUE 5   // N mero m ximo de threads esperando por leitura
-#define MAX_NKPRINT_QUEUE 50 // Número máximo de mensagens esperando por impressão
+#define MAX_NKREAD_QUEUE 5   // Numero maximo de threads esperando por leitura
+#define MAX_NKPRINT_QUEUE 50 // Numero maximo de mensagens esperando por impressao
 #define MAX_NAME_LENGTH 30
+
 unsigned int NumberTaskAdd = -1;
 volatile int TaskRunning = 0;
 char myName[MAX_NAME_LENGTH];
@@ -42,6 +45,7 @@ enum Scheduler
   RM,
   EDF
 };
+
 enum Taskstates
 {
   INITIAL,
@@ -50,12 +54,14 @@ enum Taskstates
   DEAD,
   BLOCKED
 };
+
 typedef struct
 {
   int queue[MaxNumberTask];
   int tail;
   int head;
 } ReadyList;
+
 ReadyList ready_queue;
 
 typedef struct
@@ -68,7 +74,7 @@ typedef struct
 {
   int tid;            // ID da thread esperando pela leitura
   const char *format; // Formato da entrada esperado (similar ao scanf)
-  void *var;          // Argumentos onde os dados ser o armazenados
+  void *var;          // Argumentos onde os dados serao armazenados
 } NkReadQueueEntry;
 
 typedef struct
@@ -81,7 +87,7 @@ typedef struct
     float f;
     char c;
     const char *s;
-  } var; // Variável que será impressa
+  } var; // Variavel que sera impressa
 } NkPrintQueueEntry;
 
 NkReadQueueEntry nkreadQueue[MAX_NKREAD_QUEUE];
@@ -105,6 +111,7 @@ typedef struct
   unsigned char *p2;
   unsigned char *p3;
 } Parameters;
+
 volatile Parameters kernelargs;
 
 typedef struct
@@ -118,11 +125,11 @@ typedef struct
   uint8_t Stack[SizeTaskStack]; // Vetor de pilha
   uint8_t *P;                   // Ponteiro de pilha
 } TaskDescriptor;
+
 TaskDescriptor Descriptors[MaxNumberTask]; // Array de descritores de tarefas
+
 /*
- *
- *Servicos do kernel
- *
+ * Servicos do kernel
  */
 enum sys_temCall
 {
@@ -148,11 +155,11 @@ enum sys_temCall
 };
 
 /*************************************************************
- *                                                            *
- * Rotinas do kernel                                          *
- *                                                            *
- *                                                            *
+ *                                                           *
+ * Rotinas do kernel                                         *
+ *                                                           *
  *************************************************************/
+
 void kernel()
 {
   switch (kernelargs.CallNumber)
@@ -160,71 +167,88 @@ void kernel()
   case TASKCREATE:
     sys_taskcreate((int *)kernelargs.p0, (void (*)())kernelargs.p1, (int *)kernelargs.p2);
     break;
+
   case SEM_WAIT:
-    // Serial.println("SEMWAIT: ") ;
     sys_semwait((sem_t *)kernelargs.p0);
     break;
+
   case SEM_POST:
     sys_sempost((sem_t *)kernelargs.p0);
     break;
+
   case SEM_INIT:
-    // Serial.println("SEMINIT: ") ;
     sys_seminit((sem_t *)kernelargs.p0, (int)kernelargs.p1);
     break;
-  case WRITELCDN: // NAO TEREMOS
+
+  case WRITELCDN: // Nao teremos
     // LCDcomando((int)arg->p1);
     // LCDnum((int)arg->p0);
     break;
-  case WRITELCDS: // NAO TEREMOS
+
+  case WRITELCDS: // Nao teremos
     // LCDcomando((int)arg->p1);
     // LCDputs((char*)arg->p0);
     break;
+
   case EXITTASK:
     sys_taskexit();
     break;
+
   case SLEEP:
     sys_sleep((int)kernelargs.p0);
     break;
+
   case MSLEEP:
     sys_msleep((int)kernelargs.p0);
     break;
+
   case USLEEP:
     sys_usleep((int)kernelargs.p0);
     break;
+
   case LIGALED:
     sys_ligaled();
     break;
+
   case DESLIGALED:
     sys_desligaled();
     break;
+
   case START:
     sys_start((int)kernelargs.p0);
     break;
-  case TASKJOIN: // NAO TEREMOS
-                 // sys_taskjoin((int)arg->p0);
+
+  case TASKJOIN: // Nao teremos
+    // sys_taskjoin((int)arg->p0);
     break;
+
   case SETMYNAME:
     sys_setmyname((const char *)kernelargs.p0);
     break;
+
   case GETMYNAME:
     sys_getmyname((const char *)kernelargs.p0);
     break;
+
   case NKPRINT:
     sys_nkprint((char *)kernelargs.p0, (void *)kernelargs.p1);
     break;
+
   case GETMYNUMBER:
     sys_getmynumber((int *)kernelargs.p0);
     break;
+
   case NKREAD:
     sys_nkread((char *)kernelargs.p0, (void *)kernelargs.p1);
     break;
+
   default:
     break;
   }
 }
+
 /*
- * Passa a executar a rotina do kernel com interrupcoes desabiitadas
- *
+ * Passa a executar a rotina do kernel com interrupcoes desabilitadas.
  */
 void callsvc(Parameters *args)
 {
@@ -233,10 +257,7 @@ void callsvc(Parameters *args)
   kernel();
   interrupts();
 }
-/*
- *
- *
- */
+
 void saveContext(TaskDescriptor *task)
 {
   asm volatile(
@@ -280,6 +301,7 @@ void saveContext(TaskDescriptor *task)
       "in %B0, __SP_H__ \n\t"
       : "=r"(task->P));
 }
+
 void restoreContext(TaskDescriptor *task)
 {
   asm volatile(
@@ -322,29 +344,30 @@ void restoreContext(TaskDescriptor *task)
       : : "r"(task->P));
 }
 
-void wakeUP() // acorda a task bloqueada a espera de passagem de tempo
+void wakeUP() // Acorda task bloqueada aguardando passagem de tempo.
 {
   int i = 1;
   for (i = 1; i <= NUM_TASKS; i++)
   {
-    // sleep
     if (Descriptors[i].Time > 0)
     {
       Descriptors[i].Time--;
       if (Descriptors[i].Time <= 0 && Descriptors[i].State == BLOCKED)
       {
         Descriptors[i].State = READY;
-        InsertReadyList(i); // tempo de espera se esgotou
+        InsertReadyList(i); // Tempo de espera esgotou.
       }
     }
   }
 }
 
-// Escalonador
+/*************************************************************
+ * Escalonador                                               *
+ *************************************************************/
 
 /*
- * Imprime a Ready List
- * Usada para  testes
+ * Imprime a ready list.
+ * Usada para testes.
  */
 void printReadyList()
 {
@@ -358,8 +381,8 @@ void printReadyList()
 }
 
 /*
- * Insere a task no final da Ready List
- *  sortReadyList() realizada na switchTask()
+ * Insere a task no final da ready list.
+ * A ordenacao eh feita em sortReadyList(), chamada por switchTask().
  */
 void InsertReadyList(int id)
 {
@@ -368,14 +391,12 @@ void InsertReadyList(int id)
 }
 
 /*
- *
- * Se a task atual n o   Idle (TaskRunning != 0), a task   removida da Ready List
- * Caso n o esteja bloqueada, ela   reinserida no final da Ready List
- * A remo  o   feita com o deslocamento para a esquerda
- * Chama a fun  o sortReadyList()
- * Atualiza TaskRunning com a primeira task da Ready List (TaskRunning = ready_queue.queue[0])
- * Se a Ready List estiver vazia, TaskRunning ser  0 (Idle)
- *
+ * Se a task atual nao eh idle (TaskRunning != 0), remove da ready list.
+ * Caso nao esteja bloqueada, reinsere no final da fila.
+ * A remocao eh feita com deslocamento para a esquerda.
+ * Chama sortReadyList().
+ * Atualiza TaskRunning com a primeira task da ready list.
+ * Se a lista estiver vazia, TaskRunning recebe 0 (idle).
  */
 void switchTask()
 {
@@ -388,12 +409,15 @@ void switchTask()
       ready_queue.queue[i] = ready_queue.queue[i + 1];
     }
     ready_queue.head--;
+
     if (Descriptors[TaskRunning].State != BLOCKED)
     {
       InsertReadyList(TaskRunning);
     }
   }
+
   sortReadyList();
+
   if (ready_queue.head > 0)
   {
     TaskRunning = ready_queue.queue[0];
@@ -408,11 +432,8 @@ void switchTask()
 }
 
 /*
- *
- * Algoritmo Bubble Sort para a reordena o da Ready List
- * O crit rio de ordena  o   a prioridade (Prio) definida para a task
- * Menor valor n merico indica maior prioridade
- *
+ * Bubble sort para reordenacao da ready list.
+ * Menor valor numerico de prioridade indica maior prioridade.
  */
 void sortReadyList()
 {
@@ -430,10 +451,11 @@ void sortReadyList()
   }
 }
 
-// Trata a interrupcao do Timer
-
+/*
+ * Trata interrupcao do timer.
+ */
 void systemContext()
-{ // Chamada pela interrupcao do Timer
+{
   wakeUP();
   serialEvent();
   switchTask();
@@ -441,9 +463,7 @@ void systemContext()
 }
 
 /*
- *
- * Idle Process - executa quando ready list vazia
- *
+ * Processo idle, executa quando a ready list esta vazia.
  */
 void idle()
 {
@@ -451,32 +471,33 @@ void idle()
   {
   };
 }
-/*
- *
- * Rotinas do kernel - Sys Call
- *
- */
+
+/*************************************************************
+ * Rotinas do kernel - Sys Call                              *
+ *************************************************************/
+
 void sys_taskcreate(int *tid, void (*taskFunction)(void), int priority)
 {
-
   NumberTaskAdd++;
   *tid = NumberTaskAdd;
+
   Descriptors[NumberTaskAdd].Tid = *tid;
   Descriptors[NumberTaskAdd].State = READY;
   Descriptors[NumberTaskAdd].Join = 0;
   Descriptors[NumberTaskAdd].Time = 0;
   Descriptors[NumberTaskAdd].Prio = priority;
+
   uint8_t *stack = Descriptors[*tid].Stack + SizeTaskStack - 1;
   Descriptors[*tid].P = stack;
 
   *(stack--) = ((uint16_t)taskFunction) & 0xFF;      // PC low byte
   *(stack--) = ((uint16_t)taskFunction >> 8) & 0xFF; // PC high byte
   *(stack--) = 0x00;                                 // R0
-  *(stack--) = 0x80;                                 // SREG with global interrupts enabled
+  *(stack--) = 0x80;                                 // SREG com interrupcoes globais habilitadas
 
   for (int i = 1; i < 32; i++)
   {
-    *(stack--) = i; // Initialize all other registers with their number
+    *(stack--) = i; // Inicializa os demais registradores com seu proprio numero
   }
 
   Descriptors[*tid].P = stack;
@@ -486,6 +507,7 @@ void sys_start(int scheduler)
 {
   int i;
   SchedulerAlgorithm = scheduler;
+
   switch (SchedulerAlgorithm)
   {
   case RR:
@@ -495,6 +517,7 @@ void sys_start(int scheduler)
     }
     sortReadyList();
     break;
+
   default:
     break;
   }
@@ -534,7 +557,9 @@ void sys_semwait(sem_t *semaforo)
     Descriptors[TaskRunning].State = BLOCKED;
     semaforo->tail++;
     if (semaforo->tail == MaxNumberTask - 1)
+    {
       semaforo->tail = 0;
+    }
     switchTask();
   }
 }
@@ -548,7 +573,9 @@ void sys_sempost(sem_t *semaforo)
     InsertReadyList(semaforo->sem_queue[semaforo->header]);
     semaforo->header++;
     if (semaforo->header == MaxNumberTask - 1)
+    {
       semaforo->header = 0;
+    }
   }
 }
 
@@ -561,16 +588,15 @@ void sys_seminit(sem_t *semaforo, int ValorInicial)
 
 void sys_sleep(unsigned int segundo)
 {
-  // Descriptors[TaskRunning].Time = segundo/ClkT;
+  // Descriptors[TaskRunning].Time = segundo / ClkT;
   Descriptors[TaskRunning].Time = (segundo * 1000000) / Slice;
   if (Descriptors[TaskRunning].Time > 0)
   {
     Descriptors[TaskRunning].State = BLOCKED;
     switchTask();
-
-    // select() ;
   }
 }
+
 void sys_msleep(unsigned int mili)
 {
   Descriptors[TaskRunning].Time = (mili / ClkT) / 1000;
@@ -592,26 +618,29 @@ void sys_usleep(unsigned int micro)
 }
 
 /*
- *  calcularPrecisao( float valor) chamada pela sys_nkprint
+ * calcularPrecisao(float valor): chamada por sys_nkprint.
  */
 static inline int calcularPrecisao(float valor)
 {
   int PRECISAO_FLOAT_ARDUINO = 6;
   int precisao = 0;
   int valorInteiro = (int)valor;
+
   while (valorInteiro > 0)
   {
     valorInteiro = valorInteiro / 10;
     precisao++;
   }
+
   return PRECISAO_FLOAT_ARDUINO - precisao;
 }
 
 void enqueueNkPrint(int tid, const char *format, void *var)
 {
   while (printTailMutex == true)
-    ;                    // Espera se printTailMutex estiver ocupado
-  printTailMutex = true; // Bloqueia o printTailMutex
+    ; // Espera se printTailMutex estiver ocupado.
+
+  printTailMutex = true; // Bloqueia printTailMutex.
 
   char type = 'd';
   if (strchr(format, '%'))
@@ -659,23 +688,24 @@ void enqueueNkPrint(int tid, const char *format, void *var)
   }
 
   nkprintQueueTail = (nkprintQueueTail + 1) % MAX_NKPRINT_QUEUE;
-  printTailMutex = false; // Libera o printTailMutex
+  printTailMutex = false; // Libera printTailMutex.
 }
 
 NkPrintQueueEntry dequeueNkPrint()
 {
   while (printHeadMutex == true)
-    ;                    // Espera se printHeadMutex estiver ocupado
-  printHeadMutex = true; // Bloqueia o printHeadMutex
+    ; // Espera se printHeadMutex estiver ocupado.
+
+  printHeadMutex = true; // Bloqueia printHeadMutex.
   NkPrintQueueEntry entry = nkprintQueue[nkprintQueueHead];
   nkprintQueueHead = (nkprintQueueHead + 1) % MAX_NKPRINT_QUEUE;
-  printHeadMutex = false; // Libera o printHeadMutex
+  printHeadMutex = false; // Libera printHeadMutex.
   return entry;
 }
 
 void sys_nkprint(const char *format, void *var)
 {
-  // Adicionar a mensagem na fila de escrita
+  // Adiciona a mensagem na fila de escrita.
   enqueueNkPrint(Descriptors[TaskRunning].Tid, format, var);
   switchTask();
 }
@@ -713,6 +743,7 @@ void serial_print(char *fmt, NkPrintQueueEntry entry)
         int precisao = calcularPrecisao(*auxfloat);
         Serial.print(*auxfloat, precisao);
         break;
+
       // case '.':
       //   fmt++;
       //   while(*fmt != 'f')
@@ -754,10 +785,12 @@ void serial_print(char *fmt, NkPrintQueueEntry entry)
       //   auxint=number;
       //   // printbinary(*auxint, size);
       //   break;
+
       default:
         break;
       }
       break;
+
     case '\\':
       fmt++;
       if (*fmt == 'n')
@@ -769,10 +802,12 @@ void serial_print(char *fmt, NkPrintQueueEntry entry)
         Serial.print("\\");
       }
       break;
+
     default:
       Serial.print(*fmt);
       break;
     }
+
     fmt++;
     Serial.flush();
     delay(100);
@@ -783,6 +818,7 @@ void processPrintQueue()
 {
   while (printTailMutex)
     ;
+
   printTailMutex = true;
   int snapshotTail = nkprintQueueTail;
   printTailMutex = false;
@@ -799,6 +835,7 @@ void sys_taskexit(void)
   Descriptors[TaskRunning].State = BLOCKED;
   switchTask();
 }
+
 void enqueueNkRead(int tid, const char *format, void *var)
 {
   nkreadQueue[nkreadQueueTail].tid = tid;
@@ -816,9 +853,10 @@ NkReadQueueEntry dequeueNkRead()
 
 void sys_nkread(const char *format, void *var)
 {
-  // Adicionar a thread atual na fila de leitura
+  // Adiciona a thread atual na fila de leitura.
   enqueueNkRead(Descriptors[TaskRunning].Tid, format, var);
-  // Bloquear a thread atual
+
+  // Bloqueia a thread atual.
   Descriptors[TaskRunning].State = BLOCKED;
   switchTask();
 }
@@ -834,13 +872,13 @@ float stringToFloat(const char *str)
     factor = -1.0;
   }
 
-  // Parte inteira
+  // Parte inteira.
   for (; *str >= '0' && *str <= '9'; str++)
   {
     result = result * 10.0 + (*str - '0');
   }
 
-  // Parte fracion?ria
+  // Parte fracionaria.
   if (*str == '.')
   {
     float fraction = 0.1;
@@ -860,23 +898,24 @@ void serialEvent()
   while (Serial.available())
   {
     char c = Serial.read();
+
     if (c == '\n')
     {
-      serialInputBuffer[serialInputIndex] = '\0'; // Termina a string
-      serialInputIndex = 0;                       // Reinicia o ?ndice
+      serialInputBuffer[serialInputIndex] = '\0'; // Termina a string.
+      serialInputIndex = 0;                        // Reinicia o indice.
 
-      // Desbloquear a thread que esta esperando por entrada
+      // Desbloqueia a thread que esta esperando por entrada.
       if (nkreadQueueHead != nkreadQueueTail)
       {
         NkReadQueueEntry entry = dequeueNkRead();
         if (strcmp(entry.format, "%f") == 0)
         {
-          // Para float, usar nossa fun??o auxiliar
+          // Para float, usa a funcao auxiliar.
           *(float *)(entry.var) = stringToFloat(serialInputBuffer);
         }
         else
         {
-          // Interpretar a entrada de acordo com o formato fornecido
+          // Interpreta a entrada de acordo com o formato fornecido.
           sscanf(serialInputBuffer, entry.format, entry.var);
         }
         Descriptors[entry.tid].State = READY;
@@ -893,13 +932,13 @@ void serialEvent()
 }
 
 /*************************************************************
- *                                                            *
- * Chamadas de Sistema a N vel de usu rio                     *
- *           User Call                                        *
- *                                                            *
+ *                                                           *
+ * Chamadas de sistema a nivel de usuario                   *
+ * User Call                                                 *
+ *                                                           *
  *************************************************************/
 
-void taskcreate(int *ID, void (*funcao)(), int *Priority) // parametros armazenados em R0 e R1 na chamada
+void taskcreate(int *ID, void (*funcao)(), int *Priority) // Parametros armazenados em R0 e R1 na chamada.
 {
   Parameters arg;
   arg.CallNumber = TASKCREATE;
@@ -908,6 +947,7 @@ void taskcreate(int *ID, void (*funcao)(), int *Priority) // parametros armazena
   arg.p2 = (unsigned char *)Priority;
   callsvc(&arg);
 }
+
 void start(int scheduler)
 {
   Parameters arg;
@@ -915,6 +955,7 @@ void start(int scheduler)
   arg.p0 = (unsigned char *)scheduler;
   callsvc(&arg);
 }
+
 void semwait(sem_t *semaforo)
 {
   Parameters arg;
@@ -939,6 +980,7 @@ void seminit(sem_t *semaforo, int ValorInicial)
   arg.p1 = (unsigned char *)ValorInicial;
   callsvc(&arg);
 }
+
 void setmyname(const char *name)
 {
   Parameters arg;
@@ -946,6 +988,7 @@ void setmyname(const char *name)
   arg.p0 = (unsigned char *)name;
   callsvc(&arg);
 }
+
 void getmynumber(int *number)
 {
   Parameters arg;
@@ -953,6 +996,7 @@ void getmynumber(int *number)
   arg.p0 = (unsigned char *)number;
   callsvc(&arg);
 }
+
 void getmyname(const char *name)
 {
   Parameters arg;
@@ -960,6 +1004,7 @@ void getmyname(const char *name)
   arg.p0 = (unsigned char *)name;
   callsvc(&arg);
 }
+
 void sleep(int time)
 {
   Parameters arg;
@@ -967,6 +1012,7 @@ void sleep(int time)
   arg.p0 = (unsigned char *)time;
   callsvc(&arg);
 }
+
 void msleep(int time)
 {
   Parameters arg;
@@ -983,6 +1029,7 @@ void usleep(int time)
   arg.p0 = (unsigned char *)time;
   callsvc(&arg);
 }
+
 void taskexit(void)
 {
   Parameters arg;
@@ -1012,6 +1059,7 @@ void nkprint(char *fmt, void *number)
   arg.p1 = (unsigned char *)number;
   callsvc(&arg);
 }
+
 void nkread(const char *format, void *var)
 {
   Parameters arg;
@@ -1020,11 +1068,11 @@ void nkread(const char *format, void *var)
   arg.p1 = (unsigned char *)var;
   callsvc(&arg);
 }
+
 /*************************************************************
- *                                                            *
- *                   Programa do  usu rio                     *
- *                       - Aplica  o -                        *
- *                                                            *
+ *                                                           *
+ * Programa do usuario - aplicacao                           *
+ *                                                           *
  *************************************************************/
 
 volatile int16_t tid0, tid1, tid2, tid3, tid4;
@@ -1080,7 +1128,9 @@ void p3()
   char teste2 = 'A';
   float teste3 = 3.14159;
   char teste4[20] = "Hello, World!";
+
   getmynumber(&number3);
+
   while (1)
   {
     nkprint("P3 running\n", 0);
@@ -1094,10 +1144,9 @@ void p3()
 }
 
 /*************************************************************
- *                                                            *
- *               Setup e criar Tasks                    *
- *                                                            *
- *                                                            *
+ *                                                           *
+ * Setup e criacao de tasks                                  *
+ *                                                           *
  *************************************************************/
 
 void setup()
@@ -1115,14 +1164,15 @@ void setup()
   taskcreate(&tid1, p0, 0);
   taskcreate(&tid2, p1, 1);
   taskcreate(&tid2, p2, 2);
-  // taskcreate(&tid3,p3,1);
-  start(RR); // coloca as tasks na fila
+  // taskcreate(&tid3, p3, 1);
+
+  start(RR); // Coloca as tasks na fila.
 
   noInterrupts();
   Timer1.initialize(Slice);
-  // Timer1.initialize(ClkT*1000000);
+  // Timer1.initialize(ClkT * 1000000);
   Timer1.attachInterrupt(systemContext);
-  restoreContext(&Descriptors[0]); // coloca a task idle para rodar
+  restoreContext(&Descriptors[0]); // Coloca a task idle para rodar.
 }
 
 void loop()
