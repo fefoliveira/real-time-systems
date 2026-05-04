@@ -1,7 +1,8 @@
 /*
  *
- * Versao com implementacao de fila de print
- * 06/06/2025
+ * Versao com implementacao de escalonamento RMS
+ * 30/04/2026
+ * por Fernando Oliveira
  *
  */
 
@@ -38,6 +39,10 @@ unsigned int NumberTaskAdd = -1;
 volatile int TaskRunning = 0;
 char myName[MAX_NAME_LENGTH];
 int SchedulerAlgorithm;
+
+// Constante do limite de Liu & Layland (p/ sqrt^n(2^(1/n)-1), 
+// seja n o numero de tasks, p/ n->infinito, chega-se a essa constante)
+#define RM_SCHEDULABILITY_BOUND 0.693f
 
 enum Scheduler
 {
@@ -110,6 +115,9 @@ typedef struct
   unsigned char *p1;
   unsigned char *p2;
   unsigned char *p3;
+  unsigned char *p4;
+  unsigned char *p5;
+  unsigned char *p6;
 } Parameters;
 
 volatile Parameters kernelargs;
@@ -124,6 +132,14 @@ typedef struct
   unsigned short State;
   uint8_t Stack[SizeTaskStack]; // Vetor de pilha
   uint8_t *P;                   // Ponteiro de pilha
+
+  // variaveis estaticas para o escalonador RMS (RM)
+  uint8_t period;    // periodo normal, passado na chamada da task
+  uint8_t execTime;  // tempo de compilacao normal, tambem passado na chamada da task
+
+  // variaveis dinamicas para o escalonador RMS (RM)
+  uint8_t remainingPeriod;   // tempo restante para completar o periodo atual
+  uint8_t remainingExecTime; // tempo que a task ainda precisa da cpu pra terminar sua execucao, serve para evitar que consuma mais cpu do que precisa
 } TaskDescriptor;
 
 TaskDescriptor Descriptors[MaxNumberTask]; // Array de descritores de tarefas
@@ -143,6 +159,7 @@ enum sys_temCall
   SLEEP,
   MSLEEP,
   USLEEP,
+  RMSSLEEP,
   LIGALED,
   DESLIGALED,
   START,
@@ -156,6 +173,41 @@ enum sys_temCall
 
 /*************************************************************
  *                                                           *
+ * Protótipos de Funções (Forward Declarations)              *
+ *                                                           *
+ *************************************************************/
+void sys_taskcreate(int *tid, void (*taskFunction)(void), /* int priority, */ uint8_t period, uint8_t execTime, uint8_t remainingPeriod, uint8_t remainingExecTime);
+void sys_semwait(sem_t *semaforo);
+void sys_sempost(sem_t *semaforo);
+void sys_seminit(sem_t *semaforo, int ValorInicial);
+void sys_taskexit(void);
+void sys_sleep(unsigned int segundo);
+void sys_msleep(unsigned int mili);
+void sys_usleep(unsigned int micro);
+void sys_rmssleep(void);
+void sys_ligaled(void);
+void sys_desligaled(void);
+void sys_start(int scheduler);
+void sys_setmyname(const char *name);
+void sys_getmyname(const char *name);
+void sys_nkprint(const char *format, void *var);
+void sys_getmynumber(int *number);
+void sys_nkread(const char *format, void *var);
+
+bool validateRMSchedulability();
+float getTaskUtilization(int taskId);
+float getTotalSystemUtilization();
+void InsertReadyList(int id);
+void printReadyList();
+void switchTask();
+void sortReadyList();
+void wakeUP();
+void idle();
+void serialEvent();
+void processPrintQueue();
+
+/*************************************************************
+ *                                                           *
  * Rotinas do kernel                                         *
  *                                                           *
  *************************************************************/
@@ -165,7 +217,15 @@ void kernel()
   switch (kernelargs.CallNumber)
   {
   case TASKCREATE:
-    sys_taskcreate((int *)kernelargs.p0, (void (*)())kernelargs.p1, (int *)kernelargs.p2);
+    sys_taskcreate(
+      (int *)kernelargs.p0,
+      (void (*)())kernelargs.p1,
+      /* (uint8_t)kernelargs.p2, // priority - no RM o periodo é a própria prioridade */
+      *(uint8_t *)kernelargs.p3,
+      *(uint8_t *)kernelargs.p4,
+      *(uint8_t *)kernelargs.p5,
+      *(uint8_t *)kernelargs.p6
+    );
     break;
 
   case SEM_WAIT:
@@ -204,6 +264,10 @@ void kernel()
 
   case USLEEP:
     sys_usleep((int)kernelargs.p0);
+    break;
+
+  case RMSSLEEP: 
+    sys_rmssleep();
     break;
 
   case LIGALED:
@@ -347,16 +411,42 @@ void restoreContext(TaskDescriptor *task)
 void wakeUP() // Acorda task bloqueada aguardando passagem de tempo.
 {
   int i = 1;
-  for (i = 1; i <= NUM_TASKS; i++)
+  for (i = 1; i < NUM_TASKS; i++)
   {
     if (Descriptors[i].Time > 0)
     {
       Descriptors[i].Time--;
-      if (Descriptors[i].Time <= 0 && Descriptors[i].State == BLOCKED)
+      if (Descriptors[i].Time <= 0 && Descriptors[i].State == BLOCKED && Descriptors[i].State != READY)
       {
         Descriptors[i].State = READY;
         InsertReadyList(i); // Tempo de espera esgotou.
       }
+    }
+
+    // Decrementa o tempo restante do periodo
+    if (Descriptors[i].remainingPeriod > 0) {
+      Descriptors[i].remainingPeriod--; 
+      
+      // Se chegou a zero -> novo período começa
+      if (Descriptors[i].remainingPeriod <= 0) {
+        Descriptors[i].remainingPeriod = Descriptors[i].period;
+        Descriptors[i].remainingExecTime = Descriptors[i].execTime;
+        
+        if(i != TaskRunning && Descriptors[i].State != READY) { // <- só insere se não estiver rodando
+          Descriptors[i].State = READY;
+          InsertReadyList(i);
+        }
+      }
+    }
+  }
+
+  // Decrementa o tempo de execucao da running atual FORA do for (igual ao do colega)
+  if (Descriptors[TaskRunning].remainingExecTime > 0) {
+    Descriptors[TaskRunning].remainingExecTime--;
+    
+    // detectar violação de WCET
+    if (Descriptors[TaskRunning].remainingExecTime <= 0) {
+      Descriptors[TaskRunning].State = BLOCKED;
     }
   }
 }
@@ -476,7 +566,15 @@ void idle()
  * Rotinas do kernel - Sys Call                              *
  *************************************************************/
 
-void sys_taskcreate(int *tid, void (*taskFunction)(void), int priority)
+void sys_taskcreate(
+  int *tid, 
+  void (*taskFunction)(void), 
+  /* int priority, */ // no RM o periodo é a própria prioridade
+  uint8_t period,
+  uint8_t execTime,
+  uint8_t remainingPeriod,
+  uint8_t remainingExecTime
+)
 {
   NumberTaskAdd++;
   *tid = NumberTaskAdd;
@@ -485,7 +583,17 @@ void sys_taskcreate(int *tid, void (*taskFunction)(void), int priority)
   Descriptors[NumberTaskAdd].State = READY;
   Descriptors[NumberTaskAdd].Join = 0;
   Descriptors[NumberTaskAdd].Time = 0;
-  Descriptors[NumberTaskAdd].Prio = priority;
+  // Descriptors[NumberTaskAdd].Prio = priority; // no RM, Prio é atribuído a partir do period em sys_start(RM)
+  Descriptors[NumberTaskAdd].period = period;
+  Descriptors[NumberTaskAdd].execTime = execTime;
+  Descriptors[NumberTaskAdd].remainingPeriod = remainingPeriod;
+  Descriptors[NumberTaskAdd].remainingExecTime = remainingExecTime;
+
+  // Se Period é 0 (idle), não incrementa remainingPeriod
+  if (Descriptors[NumberTaskAdd].period == 0) {
+    Descriptors[NumberTaskAdd].remainingPeriod = 0;
+    Descriptors[NumberTaskAdd].remainingExecTime = 0;
+  }
 
   uint8_t *stack = Descriptors[*tid].Stack + SizeTaskStack - 1;
   Descriptors[*tid].P = stack;
@@ -517,7 +625,27 @@ void sys_start(int scheduler)
     }
     sortReadyList();
     break;
+  case RM:
+    // NOTA IMPORTANTE: A validacao de escalonabilidade foi COMENTADA porque:
+    // 1. O Arduino UNO possui apenas 2KB de RAM total
+    // 2. Chamar validateRMSchedulability() durante setup() causa STACK OVERFLOW
+    // 3. A funcao usa muita memoria para nkprint()
+    // 4. O overflow resulta em RESET INFINITO do Arduino
+    // 
+    // if (!validateRMSchedulability()) {
+    //   nkprint("ERROR: System not schedulable with RM!\n", 0);
+    //   // Pode retornar, não fazer nada, ou parar
+    //   return;
+    // }
 
+    for (i = 1; i <= NumberTaskAdd; i++) {
+        if (Descriptors[i].period > 0) {
+          Descriptors[i].Prio = Descriptors[i].period;
+        }
+        InsertReadyList(i);
+    }
+    sortReadyList();
+    break;
   default:
     break;
   }
@@ -611,6 +739,15 @@ void sys_usleep(unsigned int micro)
 {
   Descriptors[TaskRunning].Time = (micro / ClkT) / 1000000;
   if (Descriptors[TaskRunning].Time > 0)
+  {
+    Descriptors[TaskRunning].State = BLOCKED;
+    switchTask();
+  }
+}
+
+void sys_rmssleep(void)
+{
+  if(Descriptors[TaskRunning].State == RUNNING)
   {
     Descriptors[TaskRunning].State = BLOCKED;
     switchTask();
@@ -810,7 +947,7 @@ void serial_print(char *fmt, NkPrintQueueEntry entry)
 
     fmt++;
     Serial.flush();
-    delay(100);
+    // delay(100);
   }
 }
 
@@ -938,13 +1075,22 @@ void serialEvent()
  *                                                           *
  *************************************************************/
 
-void taskcreate(int *ID, void (*funcao)(), int *Priority) // Parametros armazenados em R0 e R1 na chamada.
-{
+void taskcreate (
+  int *ID,
+  void (*funcao)(),
+  /* int *Priority, */ // no RM o periodo é a própria prioridade
+  uint8_t period,
+  uint8_t execTime
+) {
   Parameters arg;
   arg.CallNumber = TASKCREATE;
   arg.p0 = (unsigned char *)ID;
   arg.p1 = (unsigned char *)funcao;
-  arg.p2 = (unsigned char *)Priority;
+  // arg.p2 = (unsigned char *)Priority; // priority removida — p2 não é mais usado no taskcreate
+  arg.p3 = (unsigned char *)&period;     // ponteiro para period
+  arg.p4 = (unsigned char *)&execTime;   // ponteiro para execTime
+  arg.p5 = (unsigned char *)&period;     // remainingPeriod = period (inicial)
+  arg.p6 = (unsigned char *)&execTime;   // remainingExecTime = execTime (inicial)
   callsvc(&arg);
 }
 
@@ -1030,6 +1176,13 @@ void usleep(int time)
   callsvc(&arg);
 }
 
+void rmssleep(void)
+{
+  Parameters arg;
+  arg.CallNumber=RMSSLEEP;
+  callsvc(&arg);
+}
+
 void taskexit(void)
 {
   Parameters arg;
@@ -1083,15 +1236,15 @@ int i, j;
 // sem_t s3;
 
 void p0()
-{
+{     
   static int number0;
-  getmynumber(&number0);
+  getmynumber(&number0);  
   while (1)
   {
-    printReadyList();
-    // nkprint("P0 will sleep: ", 0);
-    sleep(5);
-    nkprint("P0 running: ", 0);
+    nkprint("P0 running......\n", 0);
+    for(volatile long d = 0; d < (817200L); d++);
+    nkprint("P0 Finished.\n", 0);
+    rmssleep();
   }
 }
 
@@ -1101,10 +1254,10 @@ void p1()
   getmynumber(&number1);
   while (1)
   {
-    printReadyList();
-    // nkprint("P1 will sleep: ", 0);
-    sleep(10);
-    nkprint("P1 running: ", 0);
+    nkprint("P1 running......\n", 0);
+    for(volatile long d = 0; d < 1816000L; d++);
+    nkprint("P1 Finished.\n", 0);
+    rmssleep();
   }
 }
 
@@ -1114,10 +1267,10 @@ void p2()
   getmynumber(&number2);
   while (1)
   {
-    printReadyList();
-    // nkprint("P2 will sleep: ", 0);
-    sleep(20);
-    nkprint("P2 running: ", 0);
+    nkprint("P2 running......\n", 0);
+    for(volatile long d = 0; d < 2724000L; d++);
+    nkprint("P2 Finished.\n", 0);
+    rmssleep();
   }
 }
 
@@ -1145,6 +1298,81 @@ void p3()
 
 /*************************************************************
  *                                                           *
+ * Funcoes de apoio para o escalonamento rate-monotonic      *
+ *                                                           *
+ *************************************************************/
+
+/*
+ * Valida se o conjunto de tarefas é escalonável pelo RM
+ * 
+ * Retorna:
+ *   true  (1) = escalonável (sistema é viável)
+ *   false (0) = NÃO escalonável (pode haver violação de deadline)
+ * 
+ * Função deve ser chamada em setup() ANTES de start(RM)
+ */
+bool validateRMSchedulability() {
+    float totalUtilization = 0.0f;
+    int taskCount = 0;
+    
+    for (int i = 1; i <= NumberTaskAdd; i++) {
+        if (Descriptors[i].period == 0) {
+            continue;
+        }
+        
+        float utilization = (float)Descriptors[i].execTime / (float)Descriptors[i].period;
+        
+        totalUtilization += utilization;
+        taskCount++;
+        
+        // IMPRIMINDO COM SERIAL NATIVO DE DENTRO DO KERNEL
+        Serial.print("Task "); Serial.print(i);
+        Serial.print(": Ci="); Serial.print(Descriptors[i].execTime);
+        Serial.print(", Ti="); Serial.print(Descriptors[i].period);
+        Serial.print(", util="); Serial.println(utilization, 6);
+    }
+
+    double liu_layland = NUM_TASKS * (pow(2.0, (1 / (double)NUM_TASKS)) - 1.0);
+    
+    Serial.print("Total utilization: "); Serial.println(totalUtilization, 6);
+    Serial.print("RM bound: "); Serial.println(liu_layland, 6);
+    
+    if (totalUtilization <= liu_layland) {
+        Serial.println("RESULT: SCHEDULABLE (viable)");
+        return true;
+    } else {
+        Serial.println("RESULT: NOT SCHEDULABLE (may miss deadlines)");
+        return false;
+    }
+}
+
+/*
+ * Função auxiliar para verificar escalonabilidade de uma tarefa individual
+ * Retorna a utilização (Ci/Ti) de uma tarefa específica
+ */
+float getTaskUtilization(int taskId) {
+    if (taskId < 0 || taskId > NumberTaskAdd || Descriptors[taskId].period == 0) {
+        return 0.0f;
+    }
+    return (float)Descriptors[taskId].execTime / 
+           (float)Descriptors[taskId].period;
+}
+ 
+/*
+ * Função para obter utilização total do sistema
+ */
+float getTotalSystemUtilization() {
+    float total = 0.0f;
+    for (int i = 1; i <= NumberTaskAdd; i++) {
+        if (Descriptors[i].period > 0) {
+            total += getTaskUtilization(i);
+        }
+    }
+    return total;
+}
+
+/*************************************************************
+ *                                                           *
  * Setup e criacao de tasks                                  *
  *                                                           *
  *************************************************************/
@@ -1160,13 +1388,13 @@ void setup()
   // seminit(&s2, 0);
   // seminit(&s3, 0);
 
-  taskcreate(&tid0, idle, 0);
-  taskcreate(&tid1, p0, 0);
-  taskcreate(&tid2, p1, 1);
-  taskcreate(&tid2, p2, 2);
+  taskcreate(&tid0, idle, /*0,*/ 0, 0); // idle sempre período 0 → tratado separado
+  taskcreate(&tid1, p0, /*0,*/ 10, 2);   // tarefa com período 10s → maior prioridade, period=10, execTime=2
+  taskcreate(&tid2, p1, /*0,*/ 20, 5);   // tarefa com período 20s → menor prioridade, period=10, execTime=5
+  taskcreate(&tid3, p2, /*0,*/ 30, 8);   
   // taskcreate(&tid3, p3, 1);
 
-  start(RR); // Coloca as tasks na fila.
+  start(RM); // Coloca as tasks na fila.
 
   noInterrupts();
   Timer1.initialize(Slice);
