@@ -1,7 +1,7 @@
 /*
  *
- * Versao com implementacao de escalonamento RMS
- * 30/04/2026
+ * Versao com implementacao do polling server (em cima do codigo ja com RMS)
+ * 14/05/2026
  * por Fernando Oliveira
  *
  */
@@ -43,6 +43,15 @@ int SchedulerAlgorithm;
 // Constante do limite de Liu & Layland (p/ sqrt^n(2^(1/n)-1), 
 // seja n o numero de tasks, p/ n->infinito, chega-se a essa constante)
 #define RM_SCHEDULABILITY_BOUND 0.693f
+
+// Definicoes pro Polling Server:
+#define POLLING_SERVER_PERIOD 15 // Periodo de timer do polling
+#define POLLING_SERVER_EXECTIME 3 // execTime se o polling achar algo para processar
+#define APERIODIC_QUEUE_SIZE 10 // Tamanho máximo de eventos acumulados
+enum AperiodicEvent { EVENT_NONE, EVENT_P2_SERIAL };
+volatile enum AperiodicEvent aperiodicFunctionQueue[APERIODIC_QUEUE_SIZE];
+volatile int aperiodicQueueHead = 0;
+volatile int aperiodicQueueTail = 0;
 
 enum Scheduler
 {
@@ -1057,6 +1066,9 @@ void serialEvent()
         }
         Descriptors[entry.tid].State = READY;
       }
+      else if (serialInputBuffer[0] != '\0') {
+        push_aperiodic_function(EVENT_P2_SERIAL);
+      }
     }
     else
     {
@@ -1092,6 +1104,45 @@ void taskcreate (
   arg.p5 = (unsigned char *)&period;     // remainingPeriod = period (inicial)
   arg.p6 = (unsigned char *)&execTime;   // remainingExecTime = execTime (inicial)
   callsvc(&arg);
+}
+
+// Prioridade do servidor: baseada em POLLING_SERVER_PERIOD (regra RM).
+// Isso garante que a task aperiódica compete pelo CPU como uma task
+// periódica de período Ts, usando o slack das tasks de maior prioridade
+// (menor período), e não preemptando tudo.
+void taskcreate_polling_server(int *ID, void (*funcao)())
+{
+  Parameters arg;
+  
+  uint8_t period = POLLING_SERVER_PERIOD;
+  uint8_t execTime = POLLING_SERVER_EXECTIME;
+
+  arg.CallNumber = TASKCREATE;
+  arg.p0 = (unsigned char *)ID;
+  arg.p1 = (unsigned char *)funcao;
+  arg.p3 = (unsigned char *)&period;
+  arg.p4 = (unsigned char *)&execTime;
+  arg.p5 = (unsigned char *)&period;
+  arg.p6 = (unsigned char *)&execTime;  
+  
+  callsvc(&arg);
+}
+
+void push_aperiodic_function(enum AperiodicEvent event) {
+  int next = (aperiodicQueueHead + 1) % APERIODIC_QUEUE_SIZE;
+    if (next != aperiodicQueueTail) { // Se não estiver cheia
+        aperiodicFunctionQueue[aperiodicQueueHead] = event;
+        aperiodicQueueHead = next;
+    }
+}
+
+enum AperiodicEvent pop_aperiodic_function() {
+  if (aperiodicQueueHead == aperiodicQueueTail) {
+    return EVENT_NONE; // Fila está vazia
+  }
+  enum AperiodicEvent event = aperiodicFunctionQueue[aperiodicQueueTail];
+  aperiodicQueueTail = (aperiodicQueueTail + 1) % APERIODIC_QUEUE_SIZE;
+  return event;
 }
 
 void start(int scheduler)
@@ -1263,15 +1314,7 @@ void p1()
 
 void p2()
 {
-  static int number2;
-  getmynumber(&number2);
-  while (1)
-  {
-    nkprint("P2 running......\n", 0);
-    for(volatile long d = 0; d < 2724000L; d++);
-    nkprint("P2 Finished.\n", 0);
-    rmssleep();
-  }
+  nkprint("Evento aperiodico: atividade detectada na serial.\n", 0);
 }
 
 void p3()
@@ -1285,7 +1328,7 @@ void p3()
   getmynumber(&number3);
 
   while (1)
-  {
+{
     nkprint("P3 running\n", 0);
     nkprint("int: %d\n", &teste);
     nkprint("char: %c\n", &teste2);
@@ -1293,6 +1336,56 @@ void p3()
     nkprint("percent: %%\n", 0);
     nkprint("string: %s\n", &teste4);
     sleep(2);
+  }
+}
+
+/*
+ * ============================================================================
+ * TASK CENTRAL DO POLLING SERVER (O DISPATCHER)
+ * ============================================================================
+ * * AVISO IMPORTANTE DE DESIGN (PERIGO DE JITTER E LATÊNCIA):
+ * * Embora o kernel (NKE) seja capaz de salvar o contexto perfeitamente caso o 
+ * orçamento de tempo (execTime) acabe no meio da execução de uma função 
+ * aperiódica, o verdadeiro inimigo é a LATÊNCIA.
+ * * Como funciona o perigo:
+ * Se uma função (ex: p2) for muito longa ou possuir laços de repetição (while),
+ * ela consumirá todo o tempo 'C' do polling server. O kernel irá congela-la pela 
+ * metade e ela so voltara a rodar no proximo ciclo (daqui a 'T' milissegundos).
+ * * O Efeito Cascata:
+ * Se isso acontecer, os outros eventos que já estão aguardando na fila 
+ * ficarão "mofando" por multiplos periodos do servidor ate serem atendidos.
+ * Isso gera um Jitter enorme (atraso na resposta), arruinando a previsibilidade
+ * das tarefas aperiodicas.
+ * * REGRA DO SERVIDOR:
+ * Todas as funções chamadas por este dispatcher (p2, p3, etc.) DEVEM ser 
+ * projetadas para serem extremamente curtas e não-bloqueantes. Elas devem 
+ * entrar, executar seu processamento rápido e dar 'return' imediatamente.
+ * Assim, este laço while(1) consegue processar e esvaziar a fila inteira 
+ * em uma única rajada (burst), aproveitando ao maximo o orcamento do Polling!
+ * ============================================================================
+ */
+void polling_function_selector() {
+  while (1) {
+    // 1. Tira o proximo evento da fila
+    enum AperiodicEvent event = pop_aperiodic_function();
+    
+    if (event != EVENT_NONE) {
+      // SITUAÇÃO 2: Tem evento! Despacha para a função correta.
+      switch (event) {
+        case EVENT_P2_SERIAL:
+          p2(); 
+          break;
+        // Se tivesse GPIO: case EVENT_P3_GPIO: p3(); break;
+      }
+      
+      // Quando a p2() terminar, o laço while(1) repete imediatamente 
+      // para ver se tem outro evento na fila, aproveitando o execTime restante!
+      
+    } else {
+      // SITUAÇÃO 1: Fila Vazia!
+      // Abandona a CPU para não desperdiçar tempo e volta a dormir
+      rmssleep(); 
+    }
   }
 }
 
@@ -1316,7 +1409,7 @@ bool validateRMSchedulability() {
     int taskCount = 0;
     
     for (int i = 1; i <= NumberTaskAdd; i++) {
-        if (Descriptors[i].period == 0) {
+  if (Descriptors[i].period == 0) {
             continue;
         }
         
@@ -1389,9 +1482,9 @@ void setup()
   // seminit(&s3, 0);
 
   taskcreate(&tid0, idle, /*0,*/ 0, 0); // idle sempre período 0 → tratado separado
-  taskcreate(&tid1, p0, /*0,*/ 10, 2);   // tarefa com período 10s → maior prioridade, period=10, execTime=2
-  taskcreate(&tid2, p1, /*0,*/ 20, 5);   // tarefa com período 20s → menor prioridade, period=10, execTime=5
-  taskcreate(&tid3, p2, /*0,*/ 30, 8);   
+  taskcreate(&tid1, p0, /*0,*/ 5, 2);  // periodica 1
+  taskcreate(&tid2, p1, /*0,*/ 10, 5);  // periodica 2
+  taskcreate_polling_server(&tid3, polling_function_selector);  // aperiodica (servida pelo polling server)
   // taskcreate(&tid3, p3, 1);
 
   start(RM); // Coloca as tasks na fila.
