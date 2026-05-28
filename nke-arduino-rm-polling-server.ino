@@ -1,9 +1,54 @@
 /*
- *
- * Versao com implementacao do polling server (em cima do codigo ja com RMS)
- * 14/05/2026
- * por Fernando Oliveira
- *
+ * =========================================================================================
+ * PROJETO: Implementação de Polling Server no Nanokernel Educacional (NKE) 
+ * sob Escalonamento Rate Monotonic (RM)
+ * 
+ * =========================================================================================
+ * Autor: Fernando Oliveira, João Navarro, Isabela Rennhack
+ * Instituição: Universidade Estadual do Rio Grande do Sul (Uergs)
+ * Data: Maio de 2026
+ * 
+ * ==========================================================================================
+ * DESCRIÇÃO DO SISTEMA
+ * =========================================================================================
+ * Este código estende o Nanokernel Educacional (NKE) para suportar o processamento
+ * seguro de eventos aperiódicos (como entradas via Serial e botões GPIO) sem violar
+ * as garantias de tempo estrito das tarefas periódicas críticas.
+ * * O sistema utiliza o escalonador Rate Monotonic (RM), onde tarefas de menor período 
+ * recebem maior prioridade. A escalonabilidade é garantida matematicamente mantendo a
+ * utilização total do processador (U = sum(Ci/Ti)) abaixo do limite de Liu & Layland.
+ * 
+ * ==========================================================================================
+ * ARQUITETURA IMPLEMENTADA
+ * =========================================================================================
+ * 1. Fila Circular de Eventos (Ring Buffer):
+ * - Captura eventos de hardware em tempo real, direto das interrupções
+ * (ex: `serialEvent()`, `gpioInterrupt()`).
+ * - Utiliza alocação estática para evitar latência e fragmentação da SRAM (2KB).
+ * 
+ * * 2. Polling Server (Padrão Dispatcher):
+ * - Modelado como uma tarefa periódica do RM (Ts = 15ms, Cs = 3ms).
+ * - Atua como um roteador central: consome os eventos da fila e despacha para 
+ * funções aperiódicas nativas (p2, p3).
+ * - Se a fila estiver vazia, invoca `rmssleep()` para abdicar voluntariamente da
+ * CPU, evitando espera ocupada (busy-waiting) e cedendo espaço para tarefas de
+ * menor prioridade.
+ * 
+ * * 3. Proteção contra Jitter e Latência:
+ * - Embora o NKE possua salvamento de contexto em Assembly (`saveContext`), as 
+ * funções aperiódicas são estritamente desenhadas para serem curtas e 
+ * não-bloqueantes.
+ * - Isso garante que a fila possa ser esvaziada em rajada (burst), evitando que
+ * eventos subsequentes "mofem" na fila esperando o próximo ciclo do servidor.
+ * 
+ * ==========================================================================================
+ * TESTE DE ESCALONABILIDADE (WCRT)
+ * =========================================================================================
+ * - P0 (Periódica): T = 10, C = 2 (U = 20%)
+ * - P1 (Periódica): T = 20, C = 5 (U = 25%)
+ * - Polling Server: T = 15, C = 3 (U = 20%)
+ * * Utilização Total (U) = 65% (<= 69.3%). Sistema comprovadamente viável!
+ * =========================================================================================
  */
 
 #include <avr/io.h>
