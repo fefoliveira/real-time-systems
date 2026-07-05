@@ -1,0 +1,32 @@
+# Build artifacts
+*.bin
+*.elf
+*.map
+*.lst
+*.tgz
+*.zip
+*.hex
+
+# Optional object files
+*.o
+*.a
+
+# Dependency files
+*.d
+
+# Temporary/editor files
+*~
+*.swp
+*.swo
+
+# VSCode
+.vscode/
+
+# CLion / JetBrains
+.idea/
+
+# macOS
+.DS_Store
+
+# mdk
+mdk/esputil/esputil
