@@ -12,7 +12,7 @@ The implementation is being developed as an Arduino sketch in the file [`nke-bas
 
 The code starts from an NKE version adapted for Arduino/AVR and is expected to evolve throughout the course as new real-time techniques are studied and implemented.
 
-Each part of the real-time implementation will be developed in a separate branch of the project, making it easier to compare approaches and keep the history of each technique isolated.
+Each part of the real-time implementation is organized in a separate branch. In this repository, branches work as a record of each step in the implementation of the real-time concepts studied throughout the course, making it easier to compare approaches and keep the history of each technique isolated.
 
 For testing, the following tools can be used:
 
@@ -20,6 +20,16 @@ For testing, the following tools can be used:
 - **Wokwi**: https://wokwi.com/
 
 Wokwi allows Arduino projects to be simulated directly in the browser, which is useful for testing and observing kernel behavior without always relying on the physical board.
+
+## Branches
+
+The branches are used as an implementation log for the course. Each one preserves a specific stage of the project, usually focused on one real-time systems concept or experiment.
+
+- `master`: base NKE code used as the starting point for the real-time systems adaptations.
+- `rate-monotonic`: first implementation developed in the project, focused on Rate Monotonic scheduling.
+- `deadline-monotonic`: Deadline Monotonic implementation, created mainly as a study branch for the first exam.
+- `aperiodic-polling-server`: polling server implementation for aperiodic tasks, built on top of the `rate-monotonic` branch.
+- `polling-server-with-prio`: current experimental branch, based on the polling server approach and including an initial attempt at priority inheritance. This branch was only lightly explored, so it may be incomplete or not fully functional.
 
 ## NKE References
 
