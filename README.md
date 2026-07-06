@@ -30,6 +30,8 @@ The branches are used as an implementation log for the course. Each one preserve
 - `deadline-monotonic`: Deadline Monotonic implementation, created mainly as a study branch for the first exam.
 - `aperiodic-polling-server`: polling server implementation for aperiodic tasks, built on top of the `rate-monotonic` branch.
 - `polling-server-with-prio`: current experimental branch, based on the polling server approach and including an initial attempt at priority inheritance. This branch was only lightly explored, so it may be incomplete or not fully functional.
+- `feature/esp32c3-base-nke`: base port of the NKE to the ESP32-C3 platform. This branch is no longer based on the Arduino/AVR version and uses a C bare-metal structure for ESP32-C3. The port was developed by GabrielPCamargo and is based on [GabrielPCamargo/nke_esp32c3](https://github.com/GabrielPCamargo/nke_esp32c3).
+- `feature/esp32c3-nke-timer-counter`: implementation built on top of the base ESP32-C3 NKE port, focused on timer/counter support using the ESP32-C3 system timer. This branch includes additional notes about the implementation in `timer.md`.
 
 ## NKE References
 
