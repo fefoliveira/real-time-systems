@@ -22,9 +22,18 @@
 #define Slice 1000000 // 1 segundo
 #define MaxNumberTask 4
 #define NUM_TASKS 4
-#define SizeTaskStack 128    // Tamanho da pilha da tarefa
+/*
+ * Nota de debug:
+ * Com SizeTaskStack = 128 o Arduino resetava quando P0 bloqueava no mutex.
+ * O caminho semwait() -> callsvc() -> kernel() -> sys_semwait() ->
+ * switchTask() -> saveContext() consome mais pilha do que as execucoes
+ * sem contencao. O estouro de pilha corrompia memoria/retorno e causava
+ * reset ou lixo na Serial. Aumentar a stack para 192 resolveu nos testes.
+ * A fila de print foi reduzida para compensar o uso extra de SRAM.
+ */
+#define SizeTaskStack 192    // Tamanho da pilha da tarefa
 #define MAX_NKREAD_QUEUE 5   // Numero maximo de threads esperando por leitura
-#define MAX_NKPRINT_QUEUE 50 // Numero maximo de mensagens esperando por impressao
+#define MAX_NKPRINT_QUEUE 20 // Numero maximo de mensagens esperando por impressao
 #define MAX_NAME_LENGTH 30
 
 unsigned int NumberTaskAdd = -1;
@@ -213,6 +222,8 @@ void wakeUP();
 void idle();
 void serialEvent();
 void processPrintQueue();
+const char *debugTaskName(int tid);
+void debugPriorityInheritance(int ownerTid, int waitingTid, unsigned short inheritedPrio);
 
 /*************************************************************
  *                                                           *
@@ -504,11 +515,24 @@ void switchTask()
 
   if (TaskRunning != 0)
   {
-    for (int i = 0; i < ready_queue.head - 1; i++)
+    int currentIndex = -1;
+    for (int i = 0; i < ready_queue.head; i++)
     {
-      ready_queue.queue[i] = ready_queue.queue[i + 1];
+      if (ready_queue.queue[i] == TaskRunning)
+      {
+        currentIndex = i;
+        break;
+      }
     }
-    ready_queue.head--;
+
+    if (currentIndex >= 0)
+    {
+      for (int i = currentIndex; i < ready_queue.head - 1; i++)
+      {
+        ready_queue.queue[i] = ready_queue.queue[i + 1];
+      }
+      ready_queue.head--;
+    }
 
     // PI: quem bloqueou em mutex sai da ready list ate o sempost() liberar.
     if (Descriptors[TaskRunning].State != BLOCKED && Descriptors[TaskRunning].State != BLOCKED_SEM)
@@ -690,6 +714,36 @@ void sys_getmyname(const char *name)
   strcpy(name, Descriptors[TaskRunning].name);
 }
 
+const char *debugTaskName(int tid)
+{
+  switch (tid)
+  {
+  case 1:
+    return "P0[HIGH]";
+  case 2:
+    return "P1[LOW]";
+  case 3:
+    return "P2[MED, polling]";
+  default:
+    return "TASK";
+  }
+}
+
+void debugPriorityInheritance(int ownerTid, int waitingTid, unsigned short inheritedPrio)
+{
+  // Log direto na Serial porque estamos dentro do kernel/syscall.
+  // Usar nkprint() aqui chamaria uma syscall dentro de outra syscall.
+  Serial.print("PI: ");
+  Serial.print(debugTaskName(ownerTid));
+  Serial.print(" recebeu prio ");
+  Serial.print(inheritedPrio);
+  Serial.print(" de ");
+  Serial.print(debugTaskName(waitingTid));
+  Serial.print(", pois ");
+  Serial.print(debugTaskName(waitingTid));
+  Serial.println(" bloqueou no mutex ocupado.");
+}
+
 void sys_semwait(sem_t *semaforo)
 {
   semaforo->count--;
@@ -707,7 +761,14 @@ void sys_semwait(sem_t *semaforo)
       // Heranca de prioridade: se uma tarefa mais prioritaria bloqueia,
       // o dono do mutex recebe temporariamente essa prioridade efetiva.
       Descriptors[semaforo->ownerTid].Prio = Descriptors[TaskRunning].Prio;
-      sortReadyList();
+      debugPriorityInheritance(semaforo->ownerTid, TaskRunning, Descriptors[TaskRunning].Prio);
+
+      // Nao ordenar aqui. O switchTask() chamado logo abaixo ja ordena a
+      // ready list depois que a tarefa atual foi marcada como BLOCKED_SEM.
+      // Ordenar no meio do semwait() torna a troca de contexto mais fragil.
+      //
+      // Versao removida:
+      // sortReadyList();
     }
   }
 
@@ -749,15 +810,24 @@ void sys_sempost(sem_t *semaforo)
     // Ao sair da secao critica, a tarefa que liberou o mutex volta para
     // sua prioridade RM original.
     Descriptors[releasingTid].Prio = Descriptors[releasingTid].BasePrio;
-    sortReadyList();
+
+    // Nao ordenar aqui. A task que chamou sempost() ainda esta executando,
+    // e o escalonador fara a ordenacao no proximo switchTask().
+    //
+    // Versao removida:
+    // sortReadyList();
   }
 
-  if (nextOwner >= 0 && Descriptors[nextOwner].Prio < Descriptors[TaskRunning].Prio)
-  {
-    // Se a tarefa desbloqueada tem prioridade maior que a atual, entrega
-    // a CPU imediatamente.
-    switchTask();
-  }
+  // Nao forcamos preempcao imediata dentro do sempost(). A tarefa atual
+  // normalmente libera o mutex, imprime/loga a saida da secao critica e
+  // chama rmssleep(), ou entao sera preemptada no proximo tick do timer.
+  // Isso evita uma troca de contexto dentro de uma syscall ja profunda.
+  //
+  // Versao removida:
+  // if (nextOwner >= 0 && Descriptors[nextOwner].Prio < Descriptors[TaskRunning].Prio)
+  // {
+  //   switchTask();
+  // }
 }
 
 void sys_seminit(sem_t *semaforo, int ValorInicial)
@@ -1341,24 +1411,24 @@ void p0()
   while (1)
   {
     activationCount++;
-    nkprint("P0[HIGH] run %d: inicio.\n", &activationCount);
+    nkprint("P0[HIGH] run %d.\n", &activationCount);
 
     if (activationCount >= 2)
     {
-      nkprint("P0[HIGH] tentando acessar recurso compartilhado.\n", 0);
+      nkprint("P0[HIGH] quer mutex.\n", 0);
       semwait(&sharedResourceMutex);
-      nkprint("P0[HIGH] entrou na secao critica.\n", 0);
+      nkprint("P0[HIGH] pegou mutex (roda um loop curto).\n", 0);
       for(volatile long d = 0; d < (350000L); d++);
       sempost(&sharedResourceMutex);
-      nkprint("P0[HIGH] liberou recurso compartilhado.\n", 0);
+      nkprint("P0[HIGH] liberou mutex.\n", 0);
     }
     else
     {
-      nkprint("P0[HIGH] primeira ativacao sem mutex.\n", 0);
+      nkprint("P0[HIGH] primeira rodada nao tenta mutex, para teste.\n", 0);
       for(volatile long d = 0; d < (817200L); d++);
     }
 
-    nkprint("P0[HIGH] fim, aguardando proximo periodo.\n", 0);
+    nkprint("P0[HIGH] dorme ate proximo periodo.\n", 0);
     rmssleep();
   }
 }
@@ -1373,16 +1443,15 @@ void p1()
     int currentPriority;
 
     activationCount++;
-    nkprint("P1[LOW] run %d: tentando acessar recurso compartilhado.\n", &activationCount);
+    nkprint("P1[LOW] run %d.\n", &activationCount);
+    nkprint("P1[LOW] tenta pegar mutex.\n", 0);
     semwait(&sharedResourceMutex);
-    nkprint("P1[LOW] entrou na secao critica longa.\n", 0);
-
+    nkprint("P1[LOW] conseguiu pegar mutex (roda um loop longo).\n", 0);
     for(volatile long d = 0; d < 1816000L; d++);
-
     currentPriority = Descriptors[TaskRunning].Prio;
-    nkprint("P1[LOW] prioridade efetiva antes de liberar: %d\n", &currentPriority);
+    nkprint("P1[LOW] prio depois da heranca: %d\n", &currentPriority);
     sempost(&sharedResourceMutex);
-    nkprint("P1[LOW] liberou recurso, aguardando proximo periodo.\n", 0);
+    nkprint("P1[LOW] terminou o loop, liberou mutex e vai dormir.\n", 0);
     rmssleep();
   }
 }
@@ -1391,9 +1460,9 @@ void p2()
 {
   static int eventCount = 0;
   eventCount++;
-  nkprint("P2[MED] evento serial %d: carga media atendida.\n", &eventCount);
+  nkprint("P2[MED] evento serial %d recebido.\n", &eventCount);
   for(volatile long d = 0; d < 900000L; d++);
-  nkprint("P2[MED] fim do evento serial.\n", 0);
+  nkprint("P2[MED] evento serial concluido.\n", 0);
 }
 
 void p3()
