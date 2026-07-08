@@ -37,7 +37,7 @@ int SchedulerAlgorithm;
 #define RM_SCHEDULABILITY_BOUND 0.693f
 
 // Definicoes pro Polling Server:
-#define POLLING_SERVER_PERIOD 15 // Periodo de timer do polling
+#define POLLING_SERVER_PERIOD 7 // Prioridade media no RM: P0(5) > polling(7) > P1(10)
 #define POLLING_SERVER_EXECTIME 3 // execTime se o polling achar algo para processar
 #define APERIODIC_QUEUE_SIZE 10 // Tamanho máximo de eventos acumulados
 enum AperiodicEvent { EVENT_NONE, EVENT_P2_SERIAL };
@@ -58,7 +58,8 @@ enum Taskstates
   READY,
   RUNNING,
   DEAD,
-  BLOCKED
+  BLOCKED,     // bloqueada por tempo/periodo/espera comum
+  BLOCKED_SEM  // bloqueada especificamente esperando um semaforo/mutex
 };
 
 typedef struct
@@ -74,6 +75,9 @@ typedef struct
 {
   short count;
   int sem_queue[MaxNumberTask], tail, header;
+  // Tarefa que possui o mutex no momento. Necessario para saber quem
+  // deve herdar prioridade quando outra tarefa bloquear em semwait().
+  int ownerTid;
 } sem_t;
 
 typedef struct
@@ -127,6 +131,9 @@ typedef struct
 {
   int16_t Tid;
   const char *name;
+  // Prioridade original definida pelo RM. Nunca muda durante heranca.
+  unsigned short BasePrio;
+  // Prioridade efetiva usada pelo escalonador. Pode mudar temporariamente.
   unsigned short Prio;
   unsigned int Time;
   unsigned short Join;
@@ -417,7 +424,8 @@ void wakeUP() // Acorda task bloqueada aguardando passagem de tempo.
     if (Descriptors[i].Time > 0)
     {
       Descriptors[i].Time--;
-      if (Descriptors[i].Time <= 0 && Descriptors[i].State == BLOCKED && Descriptors[i].State != READY)
+      // PI: so acorda bloqueio comum. Tarefa em BLOCKED_SEM depende do sempost().
+      if (Descriptors[i].Time <= 0 && Descriptors[i].State == BLOCKED)
       {
         Descriptors[i].State = READY;
         InsertReadyList(i); // Tempo de espera esgotou.
@@ -433,7 +441,8 @@ void wakeUP() // Acorda task bloqueada aguardando passagem de tempo.
         Descriptors[i].remainingPeriod = Descriptors[i].period;
         Descriptors[i].remainingExecTime = Descriptors[i].execTime;
         
-        if(i != TaskRunning && Descriptors[i].State != READY) { // <- só insere se não estiver rodando
+        // PI: novo periodo nao deve acordar tarefa que esta esperando mutex.
+        if(i != TaskRunning && Descriptors[i].State == BLOCKED) {
           Descriptors[i].State = READY;
           InsertReadyList(i);
         }
@@ -501,7 +510,8 @@ void switchTask()
     }
     ready_queue.head--;
 
-    if (Descriptors[TaskRunning].State != BLOCKED)
+    // PI: quem bloqueou em mutex sai da ready list ate o sempost() liberar.
+    if (Descriptors[TaskRunning].State != BLOCKED && Descriptors[TaskRunning].State != BLOCKED_SEM)
     {
       InsertReadyList(TaskRunning);
     }
@@ -584,6 +594,8 @@ void sys_taskcreate(
   Descriptors[NumberTaskAdd].State = READY;
   Descriptors[NumberTaskAdd].Join = 0;
   Descriptors[NumberTaskAdd].Time = 0;
+  Descriptors[NumberTaskAdd].BasePrio = 255;
+  Descriptors[NumberTaskAdd].Prio = 255;
   // Descriptors[NumberTaskAdd].Prio = priority; // no RM, Prio é atribuído a partir do period em sys_start(RM)
   Descriptors[NumberTaskAdd].period = period;
   Descriptors[NumberTaskAdd].execTime = execTime;
@@ -640,9 +652,10 @@ void sys_start(int scheduler)
     // }
 
     for (i = 1; i <= NumberTaskAdd; i++) {
-        if (Descriptors[i].period > 0) {
-          Descriptors[i].Prio = Descriptors[i].period;
-        }
+        // No RM, menor periodo significa maior prioridade. BasePrio guarda
+        // essa prioridade original para restaurar depois da heranca.
+        Descriptors[i].BasePrio = (Descriptors[i].period > 0) ? Descriptors[i].period : 255;
+        Descriptors[i].Prio = Descriptors[i].BasePrio;
         InsertReadyList(i);
     }
     sortReadyList();
@@ -680,31 +693,70 @@ void sys_getmyname(const char *name)
 void sys_semwait(sem_t *semaforo)
 {
   semaforo->count--;
+  if (semaforo->count >= 0)
+  {
+    // Mutex estava livre: a tarefa atual passa a ser a dona.
+    semaforo->ownerTid = TaskRunning;
+    return;
+  }
+
+  if (semaforo->ownerTid >= 0)
+  {
+    if (Descriptors[TaskRunning].Prio < Descriptors[semaforo->ownerTid].Prio)
+    {
+      // Heranca de prioridade: se uma tarefa mais prioritaria bloqueia,
+      // o dono do mutex recebe temporariamente essa prioridade efetiva.
+      Descriptors[semaforo->ownerTid].Prio = Descriptors[TaskRunning].Prio;
+      sortReadyList();
+    }
+  }
+
   if (semaforo->count < 0)
   {
+    // Mutex ocupado: enfileira a tarefa e usa um estado especifico para
+    // impedir que wakeUP() acorde a tarefa antes do sempost().
     semaforo->sem_queue[semaforo->tail] = TaskRunning;
-    Descriptors[TaskRunning].State = BLOCKED;
-    semaforo->tail++;
-    if (semaforo->tail == MaxNumberTask - 1)
-    {
-      semaforo->tail = 0;
-    }
+    Descriptors[TaskRunning].State = BLOCKED_SEM;
+    semaforo->tail = (semaforo->tail + 1) % MaxNumberTask;
     switchTask();
   }
 }
 
 void sys_sempost(sem_t *semaforo)
 {
+  int releasingTid = semaforo->ownerTid;
+  int nextOwner = -1;
+
   semaforo->count++;
   if (semaforo->count <= 0)
   {
-    Descriptors[semaforo->sem_queue[semaforo->header]].State = READY;
-    InsertReadyList(semaforo->sem_queue[semaforo->header]);
-    semaforo->header++;
-    if (semaforo->header == MaxNumberTask - 1)
-    {
-      semaforo->header = 0;
-    }
+    // Ha tarefa esperando: transfere a posse diretamente para a proxima
+    // tarefa da fila do semaforo e a devolve para a ready list.
+    nextOwner = semaforo->sem_queue[semaforo->header];
+    Descriptors[nextOwner].State = READY;
+    InsertReadyList(nextOwner);
+    semaforo->header = (semaforo->header + 1) % MaxNumberTask;
+    semaforo->ownerTid = nextOwner;
+  }
+  else
+  {
+    // Ninguem esperando: mutex fica livre.
+    semaforo->ownerTid = -1;
+  }
+
+  if (releasingTid >= 0)
+  {
+    // Ao sair da secao critica, a tarefa que liberou o mutex volta para
+    // sua prioridade RM original.
+    Descriptors[releasingTid].Prio = Descriptors[releasingTid].BasePrio;
+    sortReadyList();
+  }
+
+  if (nextOwner >= 0 && Descriptors[nextOwner].Prio < Descriptors[TaskRunning].Prio)
+  {
+    // Se a tarefa desbloqueada tem prioridade maior que a atual, entrega
+    // a CPU imediatamente.
+    switchTask();
   }
 }
 
@@ -713,6 +765,8 @@ void sys_seminit(sem_t *semaforo, int ValorInicial)
   semaforo->count = ValorInicial;
   semaforo->header = 0;
   semaforo->tail = 0;
+  // -1 indica que nenhum tid possui o mutex.
+  semaforo->ownerTid = -1;
 }
 
 void sys_sleep(unsigned int segundo)
@@ -1273,6 +1327,7 @@ void nkread(const char *format, void *var)
 
 volatile int16_t tid0, tid1, tid2, tid3, tid4;
 int i, j;
+sem_t sharedResourceMutex;
 // sem_t s0;
 // sem_t s1;
 // sem_t s2;
@@ -1281,12 +1336,29 @@ int i, j;
 void p0()
 {     
   static int number0;
+  static int activationCount = 0;
   getmynumber(&number0);  
   while (1)
   {
-    nkprint("P0 running......\n", 0);
-    for(volatile long d = 0; d < (817200L); d++);
-    nkprint("P0 Finished.\n", 0);
+    activationCount++;
+    nkprint("P0[HIGH] run %d: inicio.\n", &activationCount);
+
+    if (activationCount >= 2)
+    {
+      nkprint("P0[HIGH] tentando acessar recurso compartilhado.\n", 0);
+      semwait(&sharedResourceMutex);
+      nkprint("P0[HIGH] entrou na secao critica.\n", 0);
+      for(volatile long d = 0; d < (350000L); d++);
+      sempost(&sharedResourceMutex);
+      nkprint("P0[HIGH] liberou recurso compartilhado.\n", 0);
+    }
+    else
+    {
+      nkprint("P0[HIGH] primeira ativacao sem mutex.\n", 0);
+      for(volatile long d = 0; d < (817200L); d++);
+    }
+
+    nkprint("P0[HIGH] fim, aguardando proximo periodo.\n", 0);
     rmssleep();
   }
 }
@@ -1294,19 +1366,34 @@ void p0()
 void p1()
 {
   static int number1;
+  static int activationCount = 0;
   getmynumber(&number1);
   while (1)
   {
-    nkprint("P1 running......\n", 0);
+    int currentPriority;
+
+    activationCount++;
+    nkprint("P1[LOW] run %d: tentando acessar recurso compartilhado.\n", &activationCount);
+    semwait(&sharedResourceMutex);
+    nkprint("P1[LOW] entrou na secao critica longa.\n", 0);
+
     for(volatile long d = 0; d < 1816000L; d++);
-    nkprint("P1 Finished.\n", 0);
+
+    currentPriority = Descriptors[TaskRunning].Prio;
+    nkprint("P1[LOW] prioridade efetiva antes de liberar: %d\n", &currentPriority);
+    sempost(&sharedResourceMutex);
+    nkprint("P1[LOW] liberou recurso, aguardando proximo periodo.\n", 0);
     rmssleep();
   }
 }
 
 void p2()
 {
-  nkprint("Evento aperiodico: atividade detectada na serial.\n", 0);
+  static int eventCount = 0;
+  eventCount++;
+  nkprint("P2[MED] evento serial %d: carga media atendida.\n", &eventCount);
+  for(volatile long d = 0; d < 900000L; d++);
+  nkprint("P2[MED] fim do evento serial.\n", 0);
 }
 
 void p3()
@@ -1365,7 +1452,7 @@ void polling_function_selector() {
       // SITUAÇÃO 2: Tem evento! Despacha para a função correta.
       switch (event) {
         case EVENT_P2_SERIAL:
-          p2(); 
+          p2();
           break;
         // Se tivesse GPIO: case EVENT_P3_GPIO: p3(); break;
       }
@@ -1472,11 +1559,12 @@ void setup()
   // seminit(&s1, 0);
   // seminit(&s2, 0);
   // seminit(&s3, 0);
+  seminit(&sharedResourceMutex, 1);
 
   taskcreate(&tid0, idle, /*0,*/ 0, 0); // idle sempre período 0 → tratado separado
-  taskcreate(&tid1, p0, /*0,*/ 5, 2);  // periodica 1
-  taskcreate(&tid2, p1, /*0,*/ 10, 5);  // periodica 2
-  taskcreate_polling_server(&tid3, polling_function_selector);  // aperiodica (servida pelo polling server)
+  taskcreate(&tid1, p0, /*0,*/ 5, 2);  // alta prioridade
+  taskcreate(&tid2, p1, /*0,*/ 10, 5);  // baixa prioridade, dona do mutex
+  taskcreate_polling_server(&tid3, polling_function_selector);  // media prioridade via serial
   // taskcreate(&tid3, p3, 1);
 
   start(RM); // Coloca as tasks na fila.
